@@ -14,6 +14,7 @@
 #define MMAP_THRESHOLD	(128 * 1024)
 /* Largest request whose aligned size plus metadata does not overflow size_t */
 #define MAX_REQUEST	(SIZE_MAX - META_SIZE - ALIGNMENT)
+#define MIN(a, b)	((a) < (b) ? (a) : (b))
 
 /* List of all blocks placed on the heap (brk), ordered by address */
 static struct block_meta *heap_head;
@@ -208,8 +209,58 @@ void *os_calloc(size_t nmemb, size_t size)
 	return ptr;
 }
 
+/* Try to grow a heap block in place; returns 0 if it has to be moved */
+static int expand_block(struct block_meta *block, size_t size)
+{
+	while (block->next && block->next->status == STATUS_FREE) {
+		merge_next(block);
+		if (block->size >= size) {
+			split_block(block, size);
+			return 1;
+		}
+	}
+
+	if (block->next)
+		return 0;
+
+	/* Last block on the heap: extend the program break */
+	heap_grow(size - block->size);
+	block->size = size;
+	return 1;
+}
+
 void *os_realloc(void *ptr, size_t size)
 {
-	/* TODO: Implement os_realloc */
-	return NULL;
+	struct block_meta *block;
+	void *new_ptr;
+
+	if (!ptr)
+		return os_malloc(size);
+	if (!size) {
+		os_free(ptr);
+		return NULL;
+	}
+
+	block = get_block(ptr);
+	if (block->status == STATUS_FREE)
+		return NULL;
+	if (size > MAX_REQUEST) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	size = ALIGN(size);
+	if (block->status == STATUS_ALLOC && META_SIZE + size < MMAP_THRESHOLD) {
+		if (block->size >= size) {
+			split_block(block, size);
+			return ptr;
+		}
+		if (expand_block(block, size))
+			return ptr;
+	}
+
+	new_ptr = os_malloc(size);
+	memcpy(new_ptr, ptr, MIN(block->size, size));
+	os_free(ptr);
+	return new_ptr;
 }
